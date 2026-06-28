@@ -16,28 +16,28 @@ The scaffold must prove the whole stack works end-to-end before any game logic e
 
 ### Locked decisions
 
-| Area | Choice |
-|---|---|
-| Graphics | **ash** (raw Vulkan) + `ash-window` + `winit` |
-| Audio | **rodio** |
-| Steam | **steamworks** crate (0.13.x), **Steam Input action-based API** |
+| Area          | Choice                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------- |
+| Graphics      | **ash** (raw Vulkan) + `ash-window` + `winit`                                                           |
+| Audio         | **rodio**                                                                                               |
+| Steam         | **steamworks** crate (0.13.x), **Steam Input action-based API**                                         |
 | Steam account | Real **AppID + DepotID** in hand; steamcmd not yet set up; **no IGA manifest yet** (build from scratch) |
-| Structure | **Single binary crate** with modules |
-| Target | SteamOS/Linux primary & test platform; keep cross-platform doors open |
+| Structure     | **Single binary crate** with modules                                                                    |
+| Target        | SteamOS/Linux primary & test platform; keep cross-platform doors open                                   |
 
 ## Crate stack (`Cargo.toml`)
 
 ```toml
 [dependencies]
-ash               = "0.38"    # raw Vulkan bindings
-ash-window        = "0.13"    # surface creation from a window handle
-raw-window-handle = "0.6"     # handle interop between winit and ash-window
-winit             = "0.30"    # windowing + event loop (ApplicationHandler API)
-rodio             = "0.19"    # audio playback (sfx + music)
-steamworks        = "0.13"    # Steamworks SDK bindings incl. Input
-anyhow            = "1"       # error handling for scaffold code
-log               = "0.4"
-env_logger        = "0.11"
+ash = "0.38" # raw Vulkan bindings
+ash-window = "0.13" # surface creation from a window handle
+raw-window-handle = "0.6" # handle interop between winit and ash-window
+winit = "0.30" # windowing + event loop (ApplicationHandler API)
+rodio = "0.19" # audio playback (sfx + music)
+steamworks = "0.13" # Steamworks SDK bindings incl. Input
+anyhow = "1" # error handling for scaffold code
+log = "0.4"
+env_logger = "0.11"
 ```
 
 Shaders compiled offline to SPIR-V with `glslc` (Vulkan SDK) and committed; no build-time shader
