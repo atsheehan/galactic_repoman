@@ -1,1 +1,7 @@
 /target
+
+# SteamPipe
+/tools/steamcmd/
+/ci/steampipe/build/
+/ci/steampipe/depot.env
+steam_appid.txt

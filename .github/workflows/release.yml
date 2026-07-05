@@ -1,0 +1,65 @@
+name: Release (SteamPipe)
+
+# PRIMARY publish path. Manual dispatch only. No third-party action ever receives
+# the Steam credentials — checkout/rust actions never see them; the secret only
+# touches our own run: steps and Valve's steamcmd binary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Steam beta branch to auto-promote to (NEVER default/public)"
+        required: true
+        default: "internal"
+      description:
+        description: "Build description shown on the Steamworks Builds page"
+        required: true
+        default: "CI triangle scaffold build"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: steam-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Build and publish to SteamPipe
+    runs-on: ubuntu-latest
+    environment: Deploy
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Install steamcmd 32-bit runtime dependency
+        run: sudo apt-get update && sudo apt-get install -y lib32gcc-s1
+
+      - name: Bootstrap steamcmd from Valve CDN
+        run: ./scripts/bootstrap_steamcmd.sh
+
+      - name: Build, stage content, and render VDFs
+        env:
+          APPID: ${{ vars.STEAM_APP_ID }}
+          DEPOTID: ${{ vars.STEAM_DEPOT_ID }}
+          SETLIVE: ${{ inputs.branch }}
+        run: ./scripts/package.sh
+
+      - name: Generate Steam Guard code and publish
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_PASSWORD: ${{ secrets.STEAM_PASSWORD }}
+          STEAM_SHARED_SECRET: ${{ secrets.STEAM_SHARED_SECRET }}
+          APPID: ${{ vars.STEAM_APP_ID }}
+        run: |
+          CODE="$(python3 scripts/steam_guard_totp.py)"
+          echo "::add-mask::$CODE"
+          tools/steamcmd/steamcmd.sh \
+            +set_steam_guard_code "$CODE" \
+            +login "$STEAM_USERNAME" "$STEAM_PASSWORD" \
+            +run_app_build "$PWD/ci/steampipe/build/app_build_${APPID}.vdf" \
+            +quit

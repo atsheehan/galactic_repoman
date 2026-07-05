@@ -1,0 +1,9 @@
+"appbuild"
+{
+	"appid"		"__APPID__"
+	"desc"		"galactic_repoman scaffold (triangle-only)"
+	"buildoutput"	"output/"
+	"contentroot"	"content/"
+	"setlive"	"__SETLIVE__"
+	"depots"  { "__DEPOTID__"  "depot_build___DEPOTID__.vdf" }
+}
