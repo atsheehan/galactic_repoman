@@ -72,10 +72,32 @@ Steam Guard code in our own step, and uploads via steamcmd.
 
 ## One-time Steam setup
 
-1. On the Steamworks partner site, create the `internal` beta branch for the app
-   (optionally password-protect it).
-2. On the local Steam client, opt the game into `internal` via **Properties →
-   Betas**, so CI promotions install automatically.
+For a brand-new app this must be done in **this order** — a fresh app won't let
+you create a beta branch until a build has been set live on `default` once, and
+the Betas UI only appears on the Builds page after a build exists.
+
+1. **Builder account permission.** On the partner site under **Users &
+   Permissions**, the account in `STEAM_USERNAME` needs **Edit App Metadata**
+   (upload/commit builds) and **Publish App Changes To Steam** (set builds live on
+   a branch). Permission changes require an account admin to approve them.
+2. **Upload a first build without promoting.** Run the workflow with **`set_live`
+   unchecked** (renders an empty `setlive`, so steamcmd uploads without setting
+   live). This creates the first build and makes the Betas UI appear.
+3. **Set that first build live on `default` once, manually.** On **SteamPipe →
+   Builds** (`partner.steamgames.com/apps/builds/<APPID>`), use the *"Set build
+   live for branch…"* dropdown → **Preview Change** → **Set Build Live Now**. A
+   new app blocks beta-branch creation until this one-time step is done. This is a
+   manual bootstrap — CI never targets `default` (Steam blocks setting `default`
+   live from steamcmd anyway; only beta branches can be auto-promoted).
+4. **Create the `internal` beta branch.** On the same Builds page click **Create
+   new app branch**, name it exactly `internal` (no spaces), optionally
+   password-protect it.
+5. **Opt the local Steam client into `internal`** via **Properties → Betas**, so
+   CI promotions install automatically.
+
+After this, every workflow run with `set_live` checked auto-promotes to
+`internal`. See [Steam Branches](https://partner.steamgames.com/doc/store/application/branches)
+for the authoritative reference.
 
 ## Local testing (optional)
 
