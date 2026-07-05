@@ -17,6 +17,11 @@ on:
         description: "Steam beta branch to auto-promote to (NEVER default/public)"
         required: true
         default: "internal"
+      set_live:
+        description: "Set the build live on that branch (uncheck to upload without promoting)"
+        type: boolean
+        required: true
+        default: true
       description:
         description: "Build description shown on the Steamworks Builds page"
         required: true
@@ -45,7 +50,9 @@ jobs:
         env:
           APPID: ${{ vars.STEAM_APP_ID }}
           DEPOTID: ${{ vars.STEAM_DEPOT_ID }}
-          SETLIVE: ${{ inputs.branch }}
+          # Empty setlive uploads the build without promoting it — used to
+          # isolate a setlive/branch problem from an account-permission one.
+          SETLIVE: ${{ inputs.set_live && inputs.branch || '' }}
         run: ./scripts/package.sh
 
       # Tar preserves the executable bit (Steam's Linux depot tracks +x);

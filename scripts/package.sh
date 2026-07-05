@@ -21,7 +21,10 @@ fi
 
 : "${APPID:?APPID is required (set ci/steampipe/depot.env or export it)}"
 : "${DEPOTID:?DEPOTID is required (set ci/steampipe/depot.env or export it)}"
-SETLIVE="${SETLIVE:-internal}"
+# Only an entirely unset SETLIVE defaults to internal; an explicitly empty
+# value is preserved to mean "upload without promoting" (no colon in the
+# expansion, so "" stays "").
+SETLIVE="${SETLIVE-internal}"
 
 if [[ "$SETLIVE" == "default" || "$SETLIVE" == "public" ]]; then
 	echo "ERROR: refusing to target SETLIVE='$SETLIVE' — that is the branch real buyers get." >&2
