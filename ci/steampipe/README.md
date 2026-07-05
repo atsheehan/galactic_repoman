@@ -32,12 +32,35 @@ credential is seen only by Valve's steamcmd binary and our own YAML/shell.
 
 ### Obtaining `STEAM_SHARED_SECRET`
 
-`shared_secret` is the authenticator seed used to generate Steam Guard codes. Get
-it by exporting the builder account's authenticator with
-[Steam Desktop Authenticator](https://github.com/Jessecar96/SteamDesktopAuthenticator)
-(or a mobile authenticator export tool): the exported `maFile`/JSON contains a
-`shared_secret` field. Copy its base64 value into the `STEAM_SHARED_SECRET`
-secret. Guard it like the password — it is masked in logs, but treat it as a
+`shared_secret` is the base64 authenticator seed used to generate Steam Guard
+codes. Steam hands it out only when an authenticator is first registered to the
+account; the mobile app stores it on-device but doesn't expose it. Steam Desktop
+Authenticator is no longer maintained, so use
+[steamguard-cli](https://github.com/dyc3/steamguard-cli) (actively maintained,
+Linux/Windows/macOS).
+
+Run against the **builder account** (not your personal login):
+
+```
+steamguard setup   # registers a new authenticator; writes a .maFile
+python3 -c "import json; print(json.load(open('<steamid>.maFile'))['shared_secret'])"
+```
+
+Copy that base64 value into the `STEAM_SHARED_SECRET` secret. Verify it before
+trusting CI — `python3 scripts/steam_guard_totp.py "<shared_secret>"` should match
+the code the authenticator currently shows.
+
+> **Caveat:** an account holds only one authenticator at a time, and
+> replacing an existing one triggers Steam's 15-day trade/market hold. That's
+> why this must be a **dedicated builder account** — the hold is harmless there.
+> Never run `setup` against your personal account.
+
+Alternatives that avoid re-registration: read `shared_secret` from an existing
+SDA `.maFile` if you still have one, or extract
+`/data/data/com.valvesoftware.android.steam.community/files/Steamguard-<steamid64>`
+from a **rooted** Android device (JSON with the same field).
+
+Guard the secret like the password — it is masked in logs, but treat it as a
 service credential.
 
 ### Running
