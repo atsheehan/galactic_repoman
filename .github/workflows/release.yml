@@ -95,3 +95,15 @@ jobs:
             +login "$STEAM_USERNAME" "$STEAM_PASSWORD" \
             +run_app_build "$PWD/ci/steampipe/build/app_build_${APPID}.vdf" \
             +quit
+
+      # steamcmd's "Failed to commit build ... : Failure" is a generic message;
+      # the real reason (branch not found, access denied, depot not associated)
+      # is in its own logs. Surface them so failures are diagnosable.
+      - name: Dump steamcmd logs on failure
+        if: failure()
+        run: |
+          for f in "$HOME"/Steam/logs/*.txt; do
+            [ -e "$f" ] || continue
+            echo "===== $f ====="
+            cat "$f"
+          done
