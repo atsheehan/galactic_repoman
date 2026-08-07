@@ -1,16 +1,25 @@
 name: Release (SteamPipe)
 
-# PRIMARY publish path. Manual dispatch only. No third-party action ever receives
-# the Steam credentials — checkout/rust/artifact actions never see them; the secret
-# only touches our own run: steps and Valve's steamcmd binary.
+# PRIMARY publish path. Runs automatically on every push to main, and on manual
+# dispatch when you need to target a different beta branch or upload without
+# promoting. No third-party action ever receives the Steam credentials —
+# checkout/rust/artifact actions never see them; the secret only touches our own
+# run: steps and Valve's steamcmd binary.
 #
-# Split into two jobs so a publish failure (bad credentials, Steam/network hiccup)
-# can be retried via "Re-run failed jobs" WITHOUT repeating the ~15-minute build:
-# `build` stages the content and uploads it as an artifact; `publish` downloads it
-# and uploads to Steam. Re-running only the failed `publish` job reuses the
-# artifact from the original `build` job in the same run.
+# Nothing is built or published until `ci` passes. It calls .github/workflows/ci.yml
+# as a reusable workflow rather than duplicating fmt/clippy/test here, so the
+# checks stay defined in one place; the local `uses: ./...` form runs them at this
+# run's own commit, so what gets tested is exactly what gets published.
+#
+# The rest is split into two jobs so a publish failure (bad credentials,
+# Steam/network hiccup) can be retried via "Re-run failed jobs" WITHOUT repeating
+# the ~15-minute build: `build` stages the content and uploads it as an artifact;
+# `publish` downloads it and uploads to Steam. Re-running only the failed
+# `publish` job reuses the artifact from the original `build` job in the same run.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       branch:
@@ -38,8 +47,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build and stage content
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,9 +64,12 @@ jobs:
         env:
           APPID: ${{ vars.STEAM_APP_ID }}
           DEPOTID: ${{ vars.STEAM_DEPOT_ID }}
+          # On push there is no inputs context, so pin the dispatch defaults
+          # explicitly — otherwise the expression collapses to '' and every merge
+          # would upload without promoting.
           # Empty setlive uploads the build without promoting it — used to
           # isolate a setlive/branch problem from an account-permission one.
-          SETLIVE: ${{ inputs.set_live && inputs.branch || '' }}
+          SETLIVE: ${{ github.event_name == 'push' && 'internal' || (inputs.set_live && inputs.branch || '') }}
         run: ./scripts/package.sh
 
       # Tar preserves the executable bit (Steam's Linux depot tracks +x);
