@@ -2,6 +2,7 @@
 //! (vulkano, dynamic rendering).
 
 mod app;
+mod logging;
 mod renderer;
 
 use anyhow::Context;
@@ -10,7 +11,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use crate::app::App;
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    logging::init();
 
     let event_loop = EventLoop::new().context("creating the event loop")?;
     // The scene is static, so render on demand (initial show, resize, expose) rather

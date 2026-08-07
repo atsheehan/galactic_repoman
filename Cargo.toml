@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-env_logger = "0.11"
-log = "0.4"
+env_logger = { version = "0.11", features = ["kv"] }
+log = { version = "0.4", features = ["kv"] }
 vulkano = "0.35" # safe Vulkan wrapper (instance/device/swapchain/sync/alloc)
 vulkano-shaders = "0.35" # build-time GLSL→SPIR-V macro, generates typed shader bindings
 winit = "0.30" # windowing + event loop (ApplicationHandler)
