@@ -1,10 +1,13 @@
 name: CI
 
+# Runs directly on pull requests, and is called as a reusable workflow by
+# release.yml to gate publishing. Pushes to main are covered by that call rather
+# than a push trigger here, so a merge runs these checks once, not twice.
+
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
