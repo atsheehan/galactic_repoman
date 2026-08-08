@@ -38,6 +38,16 @@ use context::VulkanContext as Ctx;
 /// logged at `info`; a long-running session drops to `debug` to stay readable.
 const FRAMES_LOGGED_AT_INFO: u64 = 5;
 
+/// TEMPORARY DIAGNOSTIC — revert to `[0.0, 0.0, 0.0, 1.0]` once the black screen on
+/// relaunch is understood.
+///
+/// Clearing to black makes two very different failures look the same: a frame we drew
+/// nothing into, and a frame that never reached the display. Clearing to magenta tells
+/// them apart. A magenta screen means our frame is being scanned out and the triangle
+/// draw is what went missing; a still-black screen means nothing we render is reaching
+/// the display at all.
+const CLEAR_COLOR: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
+
 /// How many times in a row we will rebuild the swapchain because the present came back
 /// suboptimal. Rebuilding is supposed to resolve it; a compositor that keeps saying
 /// suboptimal anyway would otherwise have us redrawing flat out forever, which on a
@@ -155,6 +165,8 @@ impl Renderer {
         .context("creating the swapchain")?;
 
         log_swapchain("created", &swapchain);
+        // Recorded so a capture can never be misread as coming from a black-clear build.
+        log::info!("clear color {CLEAR_COLOR:?} (temporary diagnostic: magenta, not black)");
 
         let image_views = create_image_views(&images)?;
         let viewport = viewport_for(window_size.width, window_size.height);
@@ -297,7 +309,7 @@ impl Renderer {
                 color_attachments: vec![Some(RenderingAttachmentInfo {
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::Store,
-                    clear_value: Some([0.0, 0.0, 0.0, 1.0].into()),
+                    clear_value: Some(CLEAR_COLOR.into()),
                     ..RenderingAttachmentInfo::image_view(
                         self.image_views[image_index as usize].clone(),
                     )
