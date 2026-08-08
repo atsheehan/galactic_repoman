@@ -17,6 +17,9 @@ fn main() -> anyhow::Result<()> {
     // The scene is static, so render on demand (initial show, resize, expose) rather
     // than spinning a continuous loop. Switch to `ControlFlow::Poll` + a per-frame
     // redraw request once we add animation or input-driven updates.
+    //
+    // `App::about_to_wait` relaxes this to `WaitUntil` so the idle heartbeat can fire;
+    // it still parks between wake-ups and never draws unless something asks it to.
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::new(&event_loop)?;

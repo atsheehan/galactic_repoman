@@ -8,8 +8,10 @@ mod pipeline;
 pub use context::VulkanContext;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, anyhow};
+use log::Level;
 use vulkano::Validated;
 use vulkano::VulkanError;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -32,6 +34,10 @@ use winit::window::Window;
 
 use context::VulkanContext as Ctx;
 
+/// The opening frames decide whether anything ever reaches the screen, so they are
+/// logged at `info`; a long-running session drops to `debug` to stay readable.
+const FRAMES_LOGGED_AT_INFO: u64 = 5;
+
 pub struct Renderer {
     // Device-level handles needed every frame (clones of the shared `VulkanContext`).
     device: Arc<Device>,
@@ -46,6 +52,13 @@ pub struct Renderer {
 
     pub recreate_swapchain: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
+
+    // Diagnostics: draw attempts, successful presents, and when the last one landed.
+    // A run whose attempts climb while presents stay flat is a very different bug from
+    // one where neither moves.
+    frames: u64,
+    presents: u64,
+    last_present: Option<Instant>,
 }
 
 impl Renderer {
@@ -59,12 +72,38 @@ impl Renderer {
             .surface_capabilities(&surface, Default::default())
             .context("querying surface capabilities")?;
 
+        log::info!(
+            "surface capabilities: image_count {}..{:?}, current_extent {:?}, \
+             extent {:?}..{:?}, current_transform {:?}, composite_alpha {:?}",
+            surface_capabilities.min_image_count,
+            surface_capabilities.max_image_count,
+            surface_capabilities.current_extent,
+            surface_capabilities.min_image_extent,
+            surface_capabilities.max_image_extent,
+            surface_capabilities.current_transform,
+            surface_capabilities.supported_composite_alpha,
+        );
+
+        // The compositor's idea of the surface size and winit's idea of the window size
+        // are supposed to agree. When they don't, we are about to create a swapchain the
+        // compositor will not show.
+        if let Some(current_extent) = surface_capabilities.current_extent
+            && current_extent != [window_size.width, window_size.height]
+        {
+            log::warn!(
+                "surface current_extent {current_extent:?} disagrees with window {}x{}",
+                window_size.width,
+                window_size.height,
+            );
+        }
+
         // Prefer the conventional sRGB swapchain format; fall back to whatever the
         // surface offers first.
         let surface_formats = ctx
             .physical_device
             .surface_formats(&surface, Default::default())
             .context("querying surface formats")?;
+        log::debug!("surface formats: {surface_formats:?}");
         let (image_format, image_color_space) = surface_formats
             .iter()
             .copied()
@@ -84,6 +123,14 @@ impl Renderer {
             .next()
             .ok_or_else(|| anyhow!("surface reports no supported composite alpha"))?;
 
+        log::info!(
+            "creating swapchain: {}x{} (window scale {:.2}), format {image_format:?} / \
+             {image_color_space:?}, {min_image_count} images, composite alpha {composite_alpha:?}",
+            window_size.width,
+            window_size.height,
+            window.scale_factor(),
+        );
+
         let (swapchain, images) = Swapchain::new(
             ctx.device.clone(),
             surface,
@@ -99,6 +146,8 @@ impl Renderer {
             },
         )
         .context("creating the swapchain")?;
+
+        log_swapchain("created", &swapchain);
 
         let image_views = create_image_views(&images)?;
         let viewport = viewport_for(window_size.width, window_size.height);
@@ -117,7 +166,30 @@ impl Renderer {
             viewport,
             recreate_swapchain: false,
             previous_frame_end,
+            frames: 0,
+            presents: 0,
+            last_present: None,
         })
+    }
+
+    /// One-line summary for the idle heartbeat and for shutdown: how much work we have
+    /// actually pushed to the screen, and what the swapchain looks like right now.
+    pub fn status(&self) -> String {
+        let last_present = self.last_present.map_or_else(
+            || "never".to_string(),
+            |at| format!("{:.1}s ago", at.elapsed().as_secs_f32()),
+        );
+
+        format!(
+            "{} draw attempts, {} presents (last {last_present}), swapchain {:?} \
+             ({} images, {:?}), recreate_pending={}",
+            self.frames,
+            self.presents,
+            self.swapchain.image_extent(),
+            self.swapchain.image_count(),
+            self.swapchain.present_mode(),
+            self.recreate_swapchain,
+        )
     }
 
     /// Draw one frame. Called on `RedrawRequested`.
@@ -125,13 +197,37 @@ impl Renderer {
         let window_size = self.window.inner_size();
         // Skip rendering while minimized (a zero-extent swapchain is invalid).
         if window_size.width == 0 || window_size.height == 0 {
+            log::debug!("redraw skipped: window reports a zero extent");
             return Ok(());
         }
+
+        self.frames += 1;
+        let frame = self.frames;
+        let level = if frame <= FRAMES_LOGGED_AT_INFO {
+            Level::Info
+        } else {
+            Level::Debug
+        };
+
+        log::log!(
+            level,
+            "frame {frame}: begin, window {}x{}, swapchain {:?}, recreate_pending={}",
+            window_size.width,
+            window_size.height,
+            self.swapchain.image_extent(),
+            self.recreate_swapchain,
+        );
 
         // Release resources held by the previous frame's GPU work that has completed.
         self.previous_frame_end.as_mut().unwrap().cleanup_finished();
 
         if self.recreate_swapchain {
+            log::info!(
+                "frame {frame}: recreating swapchain {:?} -> {}x{}",
+                self.swapchain.image_extent(),
+                window_size.width,
+                window_size.height,
+            );
             let (new_swapchain, new_images) = self
                 .swapchain
                 .recreate(SwapchainCreateInfo {
@@ -143,19 +239,40 @@ impl Renderer {
             self.image_views = create_image_views(&new_images)?;
             self.viewport = viewport_for(window_size.width, window_size.height);
             self.recreate_swapchain = false;
+            log_swapchain("recreated", &self.swapchain);
         }
 
+        // Drawing at an extent the compositor is not expecting is one of the ways a
+        // frame gets silently dropped instead of shown.
+        if self.swapchain.image_extent() != [window_size.width, window_size.height] {
+            log::warn!(
+                "frame {frame}: swapchain extent {:?} disagrees with window {}x{}",
+                self.swapchain.image_extent(),
+                window_size.width,
+                window_size.height,
+            );
+        }
+
+        // Logged before the call because the acquire blocks with no timeout: if this is
+        // the last line a run ever produces, we were starved of swapchain images.
+        log::log!(level, "frame {frame}: acquiring image");
         let (image_index, suboptimal, acquire_future) =
             match acquire_next_image(self.swapchain.clone(), None).map_err(Validated::unwrap) {
                 Ok(r) => r,
                 Err(VulkanError::OutOfDate) => {
+                    log::info!("frame {frame}: acquire out-of-date; recreating and redrawing");
                     self.recreate_swapchain = true;
                     self.window.request_redraw();
                     return Ok(());
                 }
-                Err(e) => return Err(anyhow!("acquiring next swapchain image: {e}")),
+                Err(e) => {
+                    log::error!("frame {frame}: acquire failed: {e}");
+                    return Err(anyhow!("acquiring next swapchain image: {e}"));
+                }
             };
+        log::log!(level, "frame {frame}: acquired image {image_index}");
         if suboptimal {
+            log::info!("frame {frame}: image {image_index} is suboptimal; will recreate");
             self.recreate_swapchain = true;
         }
 
@@ -208,14 +325,22 @@ impl Renderer {
 
         match future.map_err(Validated::unwrap) {
             Ok(future) => {
+                self.presents += 1;
+                self.last_present = Some(Instant::now());
+                log::log!(
+                    level,
+                    "frame {frame}: presented image {image_index} ({} presents total)",
+                    self.presents,
+                );
                 self.previous_frame_end = Some(future.boxed());
             }
             Err(VulkanError::OutOfDate) => {
+                log::info!("frame {frame}: present out-of-date; recreating");
                 self.recreate_swapchain = true;
                 self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
             }
             Err(e) => {
-                log::error!("failed to flush frame: {e}");
+                log::error!("frame {frame}: failed to flush: {e}");
                 self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
             }
         }
@@ -223,11 +348,33 @@ impl Renderer {
         // A suboptimal present or a flush error above flags the swapchain for
         // recreation; in `Wait` mode we must schedule the frame that does it.
         if self.recreate_swapchain {
+            log::log!(
+                level,
+                "frame {frame}: redraw requested to apply the recreate"
+            );
             self.window.request_redraw();
+        } else {
+            // Nothing else will call `render` until the compositor sends an event. If
+            // this is where a black-screen run stops, the frame we just presented is
+            // the only one there will ever be.
+            log::log!(level, "frame {frame}: done, no further redraw scheduled");
         }
 
         Ok(())
     }
+}
+
+/// Report what a swapchain actually came back as, which is not always what was asked
+/// for — the compositor gets the final say on extent and image count.
+fn log_swapchain(what: &str, swapchain: &Arc<Swapchain>) {
+    log::info!(
+        "swapchain {what}: extent {:?}, {} images, format {:?} / {:?}, present mode {:?}",
+        swapchain.image_extent(),
+        swapchain.image_count(),
+        swapchain.image_format(),
+        swapchain.image_color_space(),
+        swapchain.present_mode(),
+    );
 }
 
 fn create_image_views(
