@@ -38,13 +38,28 @@ impl VulkanContext {
     /// required for the current windowing system).
     pub fn new(event_loop: &EventLoop<()>) -> anyhow::Result<Self> {
         let library = VulkanLibrary::new().context("loading the Vulkan library")?;
+        log::info!("Vulkan loader: API {}", library.api_version());
+        // Layers are injected by the environment (gamescope WSI, Fossilize, MangoHud,
+        // the Steam overlay), so which ones are present is part of the launch's identity.
+        log::info!(
+            "instance layers available: {:?}",
+            library
+                .layer_properties()
+                .map(|layers| layers
+                    .map(|layer| layer.name().to_string())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+
+        let required_extensions = Surface::required_extensions(event_loop)
+            .context("querying required surface extensions")?;
+        log::info!("required surface extensions: {required_extensions:?}");
 
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
                 flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-                enabled_extensions: Surface::required_extensions(event_loop)
-                    .context("querying required surface extensions")?,
+                enabled_extensions: required_extensions,
                 ..Default::default()
             },
         )
@@ -95,10 +110,15 @@ impl VulkanContext {
         ));
 
         log::info!(
-            "Vulkan ready: {} (type {:?}, Vulkan {})",
+            "Vulkan ready: {} (type {:?}, Vulkan {}, driver {:?} {:?}), queue family {}, \
+             extensions {:?}",
             physical_device.properties().device_name,
             physical_device.properties().device_type,
             physical_device.api_version(),
+            physical_device.properties().driver_name,
+            physical_device.properties().driver_info,
+            queue_family_index,
+            device_extensions,
         );
 
         Ok(Self {
@@ -121,6 +141,17 @@ impl VulkanContext {
         instance
             .enumerate_physical_devices()
             .context("enumerating physical devices")?
+            .inspect(|p| {
+                log::info!(
+                    "physical device seen: {} (type {:?}, Vulkan {}, dynamic_rendering ext {}, \
+                     swapchain ext {})",
+                    p.properties().device_name,
+                    p.properties().device_type,
+                    p.api_version(),
+                    p.supported_extensions().khr_dynamic_rendering,
+                    p.supported_extensions().khr_swapchain,
+                )
+            })
             .filter(|p| {
                 p.api_version() >= Version::V1_3 || p.supported_extensions().khr_dynamic_rendering
             })
