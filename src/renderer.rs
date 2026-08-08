@@ -26,8 +26,8 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::swapchain::{
-    ColorSpace, PresentMode, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
-    acquire_next_image,
+    ColorSpace, PresentInfo, PresentMode, Surface, Swapchain, SwapchainCreateInfo,
+    SwapchainPresentInfo, acquire_next_image,
 };
 use vulkano::sync::{self, GpuFuture};
 use winit::window::Window;
@@ -37,6 +37,12 @@ use context::VulkanContext as Ctx;
 /// The opening frames decide whether anything ever reaches the screen, so they are
 /// logged at `info`; a long-running session drops to `debug` to stay readable.
 const FRAMES_LOGGED_AT_INFO: u64 = 5;
+
+/// How many times in a row we will rebuild the swapchain because the present came back
+/// suboptimal. Rebuilding is supposed to resolve it; a compositor that keeps saying
+/// suboptimal anyway would otherwise have us redrawing flat out forever, which on a
+/// handheld is worse than the black screen we are chasing.
+const MAX_CONSECUTIVE_SUBOPTIMAL: u32 = 3;
 
 pub struct Renderer {
     // Device-level handles needed every frame (clones of the shared `VulkanContext`).
@@ -59,6 +65,7 @@ pub struct Renderer {
     frames: u64,
     presents: u64,
     last_present: Option<Instant>,
+    consecutive_suboptimal: u32,
 }
 
 impl Renderer {
@@ -169,6 +176,7 @@ impl Renderer {
             frames: 0,
             presents: 0,
             last_present: None,
+            consecutive_suboptimal: 0,
         })
     }
 
@@ -181,10 +189,11 @@ impl Renderer {
         );
 
         format!(
-            "{} draw attempts, {} presents (last {last_present}), swapchain {:?} \
-             ({} images, {:?}), recreate_pending={}",
+            "{} draw attempts, {} presents (last {last_present}), {} consecutive suboptimal, \
+             swapchain {:?} ({} images, {:?}), recreate_pending={}",
             self.frames,
             self.presents,
+            self.consecutive_suboptimal,
             self.swapchain.image_extent(),
             self.swapchain.image_count(),
             self.swapchain.present_mode(),
@@ -310,38 +319,120 @@ impl Renderer {
         // pacing); harmless if it doesn't.
         self.window.pre_present_notify();
 
-        let future = self
+        // Deliberately stop the future chain at the fence rather than continuing into
+        // `then_swapchain_present`. `PresentFuture::flush` maps every per-swapchain
+        // result through `|r| r.map(|_| ())`, which preserves hard errors but throws
+        // away the `VK_SUBOPTIMAL_KHR` flag — the compositor asking us to rebuild would
+        // reach us as a plain success. We present by hand below to read that flag.
+        let render_future = self
             .previous_frame_end
             .take()
             .unwrap()
             .join(acquire_future)
             .then_execute(self.queue.clone(), command_buffer)
             .context("submitting command buffer")?
-            .then_swapchain_present(
-                self.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
-            )
             .then_signal_fence_and_flush();
 
-        match future.map_err(Validated::unwrap) {
-            Ok(future) => {
-                self.presents += 1;
-                self.last_present = Some(Instant::now());
-                log::log!(
-                    level,
-                    "frame {frame}: presented image {image_index} ({} presents total)",
-                    self.presents,
-                );
-                self.previous_frame_end = Some(future.boxed());
-            }
+        // Every path from here owns restarting the sync chain, since the frame's future
+        // is consumed by the wait below rather than carried into the next frame.
+        self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
+
+        let render_future = match render_future.map_err(Validated::unwrap) {
+            Ok(future) => future,
             Err(VulkanError::OutOfDate) => {
-                log::info!("frame {frame}: present out-of-date; recreating");
+                log::info!("frame {frame}: submit out-of-date; recreating");
                 self.recreate_swapchain = true;
-                self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
+                self.window.request_redraw();
+                return Ok(());
             }
             Err(e) => {
                 log::error!("frame {frame}: failed to flush: {e}");
-                self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
+                // Nothing schedules another frame otherwise, and the one we just lost
+                // was this launch's only one.
+                self.recreate_swapchain = true;
+                self.window.request_redraw();
+                return Ok(());
+            }
+        };
+
+        // Presenting without wait semaphores is only sound because the render is already
+        // complete, so the GPU work has to be finished on the CPU side first. That costs
+        // a stall per frame, which is free on a scene that draws once and stops.
+        render_future
+            .wait(None)
+            .map_err(Validated::unwrap)
+            .context("waiting for the frame's GPU work")?;
+
+        let present_info = PresentInfo {
+            swapchain_infos: vec![SwapchainPresentInfo::swapchain_image_index(
+                self.swapchain.clone(),
+                image_index,
+            )],
+            ..Default::default()
+        };
+        // SAFETY: the fence wait above orders this after the render, the command buffer
+        // left the image in its default `PresentSrc` layout, and the image index came
+        // from the acquire at the top of this frame.
+        let present = self
+            .queue
+            .clone()
+            .with(|mut queue| unsafe { queue.present(&present_info) });
+
+        match present.map_err(Validated::unwrap) {
+            // One swapchain in, so one result out.
+            Ok(results) => results.into_iter().for_each(|result| match result {
+                Ok(false) => {
+                    self.presents += 1;
+                    self.last_present = Some(Instant::now());
+                    self.consecutive_suboptimal = 0;
+                    log::log!(
+                        level,
+                        "frame {frame}: presented image {image_index} ({} presents total)",
+                        self.presents,
+                    );
+                }
+                // The flag this whole detour exists to see: the frame went up, but the
+                // compositor no longer considers the swapchain a match for the surface.
+                Ok(true) => {
+                    self.presents += 1;
+                    self.last_present = Some(Instant::now());
+                    self.consecutive_suboptimal += 1;
+
+                    if self.consecutive_suboptimal <= MAX_CONSECUTIVE_SUBOPTIMAL {
+                        log::warn!(
+                            "frame {frame}: presented image {image_index} SUBOPTIMAL \
+                             ({}/{MAX_CONSECUTIVE_SUBOPTIMAL}); recreating and drawing again",
+                            self.consecutive_suboptimal,
+                        );
+                        self.recreate_swapchain = true;
+                    } else {
+                        // Rebuilding did not settle it, so stop: another redraw would
+                        // just be the next lap of a hot loop. Leaving `recreate_swapchain`
+                        // clear means the next real event still gets a fresh attempt.
+                        log::error!(
+                            "frame {frame}: presented image {image_index} SUBOPTIMAL \
+                             {} times running and recreating did not help; giving up on \
+                             retries for now",
+                            self.consecutive_suboptimal,
+                        );
+                    }
+                }
+                Err(VulkanError::OutOfDate) => {
+                    log::info!("frame {frame}: present out-of-date; recreating");
+                    self.recreate_swapchain = true;
+                }
+                Err(e) => {
+                    log::error!("frame {frame}: present failed: {e}");
+                    self.recreate_swapchain = true;
+                }
+            }),
+            Err(VulkanError::OutOfDate) => {
+                log::info!("frame {frame}: present out-of-date; recreating");
+                self.recreate_swapchain = true;
+            }
+            Err(e) => {
+                log::error!("frame {frame}: present failed: {e}");
+                self.recreate_swapchain = true;
             }
         }
 
