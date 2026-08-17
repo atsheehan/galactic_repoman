@@ -1,4 +1,6 @@
 /target
+/logs
+!/logs/.keep
 
 # SteamPipe
 /tools/steamcmd/
