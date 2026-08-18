@@ -1,0 +1,13 @@
+[package]
+name = "plan-render"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Renders the plans/ markdown documents to styled, self-contained HTML."
+
+[dependencies]
+anyhow = "1"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+[profile.release]
+opt-level = "s"

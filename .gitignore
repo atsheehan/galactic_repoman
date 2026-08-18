@@ -2,6 +2,9 @@
 /logs
 !/logs/.keep
 
+# plan-render is a standalone crate, so it has its own target dir
+/tools/plan-render/target/
+
 # SteamPipe
 /tools/steamcmd/
 /ci/steampipe/build/
