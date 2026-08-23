@@ -22,8 +22,8 @@ use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::ImageUsage;
 use vulkano::image::view::ImageView;
-use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::pipeline::{GraphicsPipeline, Pipeline};
 use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::swapchain::{
     ColorSpace, PresentInfo, PresentMode, Surface, Swapchain, SwapchainCreateInfo,
@@ -213,8 +213,11 @@ impl Renderer {
         )
     }
 
-    /// Draw one frame. Called on `RedrawRequested`.
-    pub fn render(&mut self) -> anyhow::Result<()> {
+    /// Draw one frame at the given rotation. Called on `RedrawRequested`.
+    ///
+    /// Takes the angle rather than the game state: the renderer draws what it is told
+    /// to, and game types stay out of it.
+    pub fn render(&mut self, angle: f32) -> anyhow::Result<()> {
         let window_size = self.window.inner_size();
         // Skip rendering while minimized (a zero-extent swapchain is invalid).
         if window_size.width == 0 || window_size.height == 0 {
@@ -232,7 +235,8 @@ impl Renderer {
 
         log::log!(
             level,
-            "frame {frame}: begin, window {}x{}, swapchain {:?}, recreate_pending={}",
+            "frame {frame}: begin, angle {angle:.3} rad, window {}x{}, swapchain {:?}, \
+             recreate_pending={}",
             window_size.width,
             window_size.height,
             self.swapchain.image_extent(),
@@ -320,7 +324,11 @@ impl Renderer {
             .set_viewport(0, [self.viewport.clone()].into_iter().collect())
             .context("set_viewport")?
             .bind_pipeline_graphics(self.pipeline.clone())
-            .context("bind_pipeline_graphics")?;
+            .context("bind_pipeline_graphics")?
+            // Recorded into this frame's command buffer, so the value travels with the
+            // commands that read it — no buffer and no cross-frame synchronization.
+            .push_constants(self.pipeline.layout().clone(), 0, pipeline::Push { angle })
+            .context("push_constants")?;
         // SAFETY: 3 baked vertices, no out-of-bounds vertex/index access.
         unsafe { builder.draw(3, 1, 0, 0) }.context("draw")?;
         builder.end_rendering().context("end_rendering")?;

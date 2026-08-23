@@ -25,6 +25,11 @@ mod vs {
     vulkano_shaders::shader! { ty: "vertex", path: "src/shaders/triangle.vert" }
 }
 
+/// The vertex shader's push constant block, generated from the GLSL by
+/// `vulkano_shaders`. Re-exported so `renderer.rs` can fill it in per frame without
+/// reaching into the shader module.
+pub use vs::Push;
+
 mod fs {
     vulkano_shaders::shader! { ty: "fragment", path: "src/shaders/triangle.frag" }
 }
@@ -56,6 +61,20 @@ pub fn create_pipeline(
             .context("building pipeline layout create info")?,
     )
     .context("creating pipeline layout")?;
+
+    // The push constant range is reflected out of the SPIR-V rather than declared here,
+    // so an empty range means the shader's block was optimized away or never reflected —
+    // and `push_constants` would then be writing into nothing.
+    if layout.push_constant_ranges().is_empty() {
+        return Err(anyhow!(
+            "pipeline layout reflected no push constant ranges; the vertex shader's \
+             `Push` block did not survive compilation"
+        ));
+    }
+    log::debug!(
+        "reflected push constant ranges: {:?}",
+        layout.push_constant_ranges()
+    );
 
     // Dynamic-rendering hookup: this replaces a render pass/subpass. The pipeline must
     // know the color attachment format up front.

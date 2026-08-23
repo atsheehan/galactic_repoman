@@ -1,5 +1,5 @@
-//! Galactic Repoman — Step 1: open a window and draw a Vulkan colored triangle
-//! (vulkano, dynamic rendering).
+//! Galactic Repoman — a window and a Vulkan colored triangle (vulkano, dynamic
+//! rendering), currently rotated by a fixed angle pushed to the vertex shader.
 
 mod app;
 mod logging;
@@ -14,12 +14,9 @@ fn main() -> anyhow::Result<()> {
     logging::init();
 
     let event_loop = EventLoop::new().context("creating the event loop")?;
-    // The scene is static, so render on demand (initial show, resize, expose) rather
-    // than spinning a continuous loop. Switch to `ControlFlow::Poll` + a per-frame
-    // redraw request once we add animation or input-driven updates.
-    //
-    // `App::about_to_wait` relaxes this to `WaitUntil` so the idle heartbeat can fire;
-    // it still parks between wake-ups and never draws unless something asks it to.
+    // The scene is still static, so render on demand (initial show, resize, expose)
+    // rather than spinning a continuous loop. Step 3b introduces the clock and with it
+    // `ControlFlow::Poll` while animating, falling back to `Wait` when idle or occluded.
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::new(&event_loop)?;
