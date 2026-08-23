@@ -3,10 +3,13 @@ name: CI
 # Runs directly on pull requests, and is called as a reusable workflow by
 # release.yml to gate publishing. Pushes to main are covered by that call rather
 # than a push trigger here, so a merge runs these checks once, not twice.
+#
+# Deliberately unfiltered by base branch: `branches:` matches a pull request's
+# base, so filtering on `main` skipped every pull request in a stack except the
+# bottom one, and a required check that never reports blocks the merge forever.
 
 on:
   pull_request:
-    branches: [main]
   workflow_call:
 
 permissions:
