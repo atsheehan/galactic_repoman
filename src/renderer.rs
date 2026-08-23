@@ -2,11 +2,13 @@
 //! synchronization future. Recreated on resize; the device-level [`VulkanContext`]
 //! it borrows from survives across recreations.
 
+mod capture;
 mod context;
 mod pipeline;
 
 pub use context::VulkanContext;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,12 +18,14 @@ use vulkano::Validated;
 use vulkano::VulkanError;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, RenderingAttachmentInfo, RenderingInfo,
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo, RenderingAttachmentInfo,
+    RenderingInfo,
 };
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::ImageUsage;
 use vulkano::image::view::ImageView;
+use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline};
 use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
@@ -59,6 +63,7 @@ pub struct Renderer {
     device: Arc<Device>,
     queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
 
     pub window: Arc<Window>,
     swapchain: Arc<Swapchain>,
@@ -68,6 +73,13 @@ pub struct Renderer {
 
     pub recreate_swapchain: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
+
+    // Where the next frame should be written as a PNG, if a capture was asked for.
+    // Consumed by the frame that serves it.
+    pending_capture: Option<PathBuf>,
+    // Whether the surface let us ask for a transfer-source swapchain at all; without
+    // it there is nothing to copy out of.
+    capture_supported: bool,
 
     // Diagnostics: draw attempts, successful presents, and when the last one landed.
     // A run whose attempts climb while presents stay flat is a very different bug from
@@ -134,6 +146,19 @@ impl Renderer {
         let min_image_count = (surface_capabilities.min_image_count + 1)
             .min(surface_capabilities.max_image_count.unwrap_or(u32::MAX));
 
+        // Capturing reads the presented image back, which a plain color attachment
+        // cannot serve. Ask for the transfer source too where the surface allows it,
+        // and simply do without screenshots where it does not.
+        let capture_supported = surface_capabilities
+            .supported_usage_flags
+            .contains(ImageUsage::TRANSFER_SRC);
+        let image_usage = if capture_supported {
+            ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC
+        } else {
+            log::warn!("surface does not support TRANSFER_SRC; screenshots are unavailable");
+            ImageUsage::COLOR_ATTACHMENT
+        };
+
         let composite_alpha = surface_capabilities
             .supported_composite_alpha
             .into_iter()
@@ -156,7 +181,7 @@ impl Renderer {
                 image_format,
                 image_color_space,
                 image_extent: [window_size.width, window_size.height],
-                image_usage: ImageUsage::COLOR_ATTACHMENT,
+                image_usage,
                 composite_alpha,
                 present_mode: PresentMode::Fifo,
                 ..Default::default()
@@ -178,6 +203,7 @@ impl Renderer {
             device: ctx.device.clone(),
             queue: ctx.queue.clone(),
             command_buffer_allocator: ctx.command_buffer_allocator.clone(),
+            memory_allocator: ctx.memory_allocator.clone(),
             window,
             swapchain,
             image_views,
@@ -185,6 +211,8 @@ impl Renderer {
             viewport,
             recreate_swapchain: false,
             previous_frame_end,
+            pending_capture: None,
+            capture_supported,
             frames: 0,
             presents: 0,
             last_present: None,
@@ -211,6 +239,23 @@ impl Renderer {
             self.swapchain.present_mode(),
             self.recreate_swapchain,
         )
+    }
+
+    /// Ask for the next frame to be written to `path` as a PNG. Replaces any capture
+    /// that was requested but has not been served yet.
+    pub fn request_capture(&mut self, path: PathBuf) {
+        if !self.capture_supported {
+            log::warn!("capture requested, but the swapchain is not a transfer source; ignored");
+            return;
+        }
+
+        log::info!("capture requested: {}", path.display());
+        self.pending_capture = Some(path);
+    }
+
+    /// Whether a requested capture is still waiting for a frame to serve it.
+    pub fn capture_pending(&self) -> bool {
+        self.pending_capture.is_some()
     }
 
     /// Draw one frame at the given rotation. Called on `RedrawRequested`.
@@ -301,6 +346,10 @@ impl Renderer {
             self.recreate_swapchain = true;
         }
 
+        // Read once, after any recreation above, so the copy and the PNG agree with the
+        // image actually being drawn into.
+        let image_extent = self.swapchain.image_extent();
+
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -332,6 +381,33 @@ impl Renderer {
         // SAFETY: 3 baked vertices, no out-of-bounds vertex/index access.
         unsafe { builder.draw(3, 1, 0, 0) }.context("draw")?;
         builder.end_rendering().context("end_rendering")?;
+
+        // Taken only here, once this frame is certain to be recorded: a frame that
+        // bailed out earlier leaves the request standing for the next one to serve.
+        // A capture is a debugging aid, so failing to stage one is logged rather than
+        // allowed to take the run down.
+        let capture = match self.pending_capture.take() {
+            None => None,
+            Some(path) => {
+                match capture::staging_buffer(self.memory_allocator.clone(), image_extent).and_then(
+                    |buffer| {
+                        builder
+                            .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+                                self.image_views[image_index as usize].image().clone(),
+                                buffer.clone(),
+                            ))
+                            .context("recording the capture copy")?;
+                        Ok(buffer)
+                    },
+                ) {
+                    Ok(buffer) => Some((path, buffer)),
+                    Err(e) => {
+                        log::error!("frame {frame}: capture skipped: {e:#}");
+                        None
+                    }
+                }
+            }
+        };
 
         let command_buffer = builder.build().context("building command buffer")?;
 
@@ -382,6 +458,22 @@ impl Renderer {
             .wait(None)
             .map_err(Validated::unwrap)
             .context("waiting for the frame's GPU work")?;
+
+        // The fence wait above also covers the capture copy, so the staging buffer now
+        // holds this frame's pixels and needs no further synchronization to read.
+        if let Some((path, buffer)) = capture {
+            let written = buffer
+                .read()
+                .context("mapping the capture staging buffer")
+                .and_then(|pixels| {
+                    capture::write_png(&path, image_extent, self.swapchain.image_format(), &pixels)
+                });
+
+            match written {
+                Ok(()) => log::info!("frame {frame}: captured to {}", path.display()),
+                Err(e) => log::error!("frame {frame}: capture failed: {e:#}"),
+            }
+        }
 
         let present_info = PresentInfo {
             swapchain_infos: vec![SwapchainPresentInfo::swapchain_image_index(

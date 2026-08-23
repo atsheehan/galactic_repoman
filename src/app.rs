@@ -2,17 +2,28 @@
 //! per-window [`Renderer`]. The window (and thus the renderer) is created on
 //! `resumed`, as winit requires.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::renderer::{Renderer, VulkanContext};
+
+/// Set to a path to capture the first frame there and exit. The compositor will not
+/// screenshot us (GNOME's Wayland session refuses the Shell screenshot interface to
+/// everyone, `gnome-screenshot` included), so this is how a script — or an agent with
+/// no eyes on the display — gets a look at what was actually rendered.
+const CAPTURE_ENV: &str = "GALACTIC_REPOMAN_CAPTURE";
+
+/// Where interactive captures land. Ignored by git.
+const CAPTURE_DIR: &str = "screenshots";
 
 /// Step 3a: a fixed tilt, so the push constant path can be proved on its own before
 /// a clock (3b) or input (3c) can be blamed for a triangle that will not move.
@@ -21,6 +32,10 @@ const ANGLE: f32 = 0.5;
 pub struct App {
     context: VulkanContext,
     renderer: Option<Renderer>,
+
+    /// One-shot capture requested through the environment: draw one frame, write it,
+    /// and quit.
+    capture_once: Option<PathBuf>,
 }
 
 impl App {
@@ -28,6 +43,7 @@ impl App {
         Ok(Self {
             context: VulkanContext::new(event_loop)?,
             renderer: None,
+            capture_once: std::env::var_os(CAPTURE_ENV).map(PathBuf::from),
         })
     }
 }
@@ -63,7 +79,12 @@ impl ApplicationHandler for App {
         })();
 
         match result {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
+                if let Some(path) = self.capture_once.clone() {
+                    log::info!("{CAPTURE_ENV} is set; capturing one frame and exiting");
+                    renderer.request_capture(path);
+                }
+
                 // Kick off the first frame; in `Wait` mode nothing else would.
                 redraw(&renderer, "renderer ready");
                 self.renderer = Some(renderer);
@@ -128,9 +149,23 @@ impl ApplicationHandler for App {
                     log::info!("focus lost");
                 }
             }
+            // Bound physically, and handled here rather than as a game action: a
+            // screenshot is a developer tool, not something the player does.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state.is_pressed()
+                    && event.physical_key == PhysicalKey::Code(KeyCode::F12) =>
+            {
+                renderer.request_capture(capture_path());
+            }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = renderer.render(ANGLE) {
                     log::error!("render error: {e:#}");
+                    event_loop.exit();
+                    return;
+                }
+
+                // The frame that served the one-shot capture is the only one asked for.
+                if self.capture_once.is_some() && !renderer.capture_pending() {
                     event_loop.exit();
                 }
             }
@@ -147,6 +182,15 @@ impl ApplicationHandler for App {
             ),
         );
     }
+}
+
+/// A capture filename that sorts chronologically and never collides within a run.
+fn capture_path() -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+
+    PathBuf::from(CAPTURE_DIR).join(format!("frame-{stamp}.png"))
 }
 
 /// Ask for a frame and say who asked. On a static scene every frame is traceable to
