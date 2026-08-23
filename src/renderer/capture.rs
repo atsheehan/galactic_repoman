@@ -85,7 +85,9 @@ fn to_rgba(format: Format, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
     match format {
         Format::R8G8B8A8_SRGB | Format::R8G8B8A8_UNORM => Ok(pixels.to_vec()),
         Format::B8G8R8A8_SRGB | Format::B8G8R8A8_UNORM => Ok(pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|bgra| [bgra[2], bgra[1], bgra[0], bgra[3]])
             .collect()),
         other => Err(anyhow!(
