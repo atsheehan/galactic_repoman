@@ -7,3 +7,6 @@
 /ci/steampipe/build/
 /ci/steampipe/depot.env
 steam_appid.txt
+
+# Frames captured with F12 or GALACTIC_REPOMAN_CAPTURE
+/screenshots/

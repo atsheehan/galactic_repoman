@@ -425,6 +425,13 @@ triangle that does not move can only be one thing at a time.
 
 Each phase has its own gate; nothing below is checked before the phase that introduces it.
 
+The visual gates do not depend on the desktop: `F12` writes the next frame to
+`screenshots/`, and `GALACTIC_REPOMAN_CAPTURE=<path>` captures the first frame and exits, so
+a phase can be checked from a script. This exists because GNOME's Wayland session refuses
+every external screenshot route, and it is the only capture path that will still work under
+gamescope on the Deck. A single frame cannot show motion, so the animated gates (3b, 3d) need
+two captures taken a moment apart, or an eye on the window.
+
 1. **3a:** `cargo run` shows a *tilted* triangle, held still. Resize and close still work, no
    validation errors. `app.rs` no longer mentions the heartbeat or `log_window_event`.
 2. **3b:** the triangle spins at a steady rate on its own. Resize while spinning → no stutter,
